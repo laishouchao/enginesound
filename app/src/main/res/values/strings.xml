@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">触觉低音炮 (EngineSound)</string>
+    <string name="service_notification_title">触觉引擎正在运行</string>
+    <string name="service_notification_text">正在实时分析音频并驱动线性马达...</string>
+</resources>
