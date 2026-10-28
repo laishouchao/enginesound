@@ -125,7 +125,7 @@ class GlobalAudioCapture(
 
             var lastMode = motorController.currentWorkMode
 
-            while (isCapturing && coroutineContext.isActive) {
+            while (isCapturing) {
                 // 检测模式变动：若切入模式 B，通过 ROOT 压制物理扬声器
                 if (motorController.currentWorkMode != lastMode) {
                     lastMode = motorController.currentWorkMode

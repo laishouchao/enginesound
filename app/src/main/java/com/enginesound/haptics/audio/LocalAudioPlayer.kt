@@ -174,7 +174,7 @@ class LocalAudioPlayer(
                         if (inputBuffer != null) {
                             val sampleSize = extractor.readSampleData(inputBuffer, 0)
                             if (sampleSize < 0) {
-                                codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_SECTION)
+                                codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 isEOS = true
                             } else {
                                 codec.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
