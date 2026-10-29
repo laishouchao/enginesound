@@ -98,7 +98,7 @@ fun HapticAppUI(
                                 .padding(horizontal = 6.dp, vertical = 2.dp)
                         ) {
                             Text(
-                                text = if (profile.isRedmiK40G) "K40G 特调版" else "${profile.manufacturer} 通用版",
+                                text = if (profile.isRedmiK40G) "K40G 特调 v1.1.0" else "${profile.manufacturer} 通用 v1.1.0",
                                 color = if (profile.isRedmiK40G) CyberGreen else CyberCyan,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold
@@ -197,12 +197,25 @@ fun DeviceProfileCard(profile: DeviceProfileManager.DeviceProfile, isRootAvailab
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "${profile.manufacturer} ${profile.model}",
-                color = TextPrimary,
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${profile.manufacturer} ${profile.model}",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
+                Text(
+                    text = "v1.1.0",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = profile.recommendedEngineDescription,

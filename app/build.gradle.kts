@@ -11,8 +11,8 @@ android {
         applicationId = "com.enginesound.haptics"
         minSdk = 29 // Android 10 is required for AudioPlaybackCaptureConfiguration
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

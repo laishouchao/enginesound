@@ -40,14 +40,14 @@ jobs:
         id: prepare_artifact
         run: |
           mkdir -p release-output
-          cp app/build/outputs/apk/release/app-release.apk release-output/EngineSound-Haptics-v1.0.0.apk
+          cp app/build/outputs/apk/release/app-release.apk release-output/EngineSound-Haptics-v1.1.0.apk
           echo "APK successfully generated and copied."
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: EngineSound-Haptics-APK
-          path: release-output/EngineSound-Haptics-v1.0.0.apk
+          path: release-output/EngineSound-Haptics-v1.1.0.apk
 
       - name: Determine Release Tag
         id: release_tag
@@ -55,33 +55,25 @@ jobs:
           if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
             echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
           else
-            echo "TAG_NAME=v1.0.0-$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
+            echo "TAG_NAME=v1.1.0-$(date +'%Y%m%d%H%M')" >> $GITHUB_ENV
           fi
 
       - name: Create GitHub Release and Publish APK
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG_NAME }}
-          name: "EngineSound Haptics ${{ env.TAG_NAME }} (Redmi K40G 专版)"
+          name: "EngineSound Haptics ${{ env.TAG_NAME }} (全品牌通用 + K40G 专版)"
           body: |
             ### 触觉低音炮 (EngineSound) 发布说明
 
-            专为 **红米 K40 游戏增强版 (Redmi K40G / 天玑1200 / X轴线性马达 / 已ROOT)** 深度定制的触觉引擎应用。
+            全面兼容适配 **全品牌 Android 手机 (小米/红米/三星/一加/OPPO/vivo/Pixel等)**，并保留 **红米 K40 游戏增强版 (Redmi K40G / 天玑1200 / X轴线性马达 / 已ROOT)** 深度专属特调。
 
-            #### ✨ 核心功能
-            - **两种音频来源**：支持打开本地音频文件，或开启【全局音频捕获】免打开文件监听 B站、网易云、抖音、游戏等所有第三方 App 发声。
-            - **两种工作模式**：
-              - **模式 A (默认)**：喇叭正常放歌 + 马达跟随低频鼓点瞬态打击。
-              - **模式 B (纯振动模拟)**：**喇叭静音不出声！** 将 0~200Hz 低频包络连续映射为马达不同强度物理共振，用手机机身模拟低音炮振膜。
-            - **双驱动引擎**：支持 Android 原生 `Vibrator` 与 `ROOT Sysfs` 硬件底层直接读写（<1ms 极低延迟）。
-            - **安全与平滑防护**：包含非对称包络平滑滤波（防止马达爆震频闪）与连续高占空比线圈过热保护。
-            - **延迟校准**：内置时间偏移滑块（-150ms ~ +250ms）精准对齐音振同步。
-
-            #### ⚠️ 刷入与使用说明
-            1. 下载下方 APK 并安装。
-            2. 授予 ROOT 权限（Magisk / KernelSU）以启用 Sysfs 极速直驱。
-            3. 若使用全局音频捕获，请在弹出的系统屏幕/音频捕获授权中点击「立即开始」。
-            4. 在 MIUI / HyperOS 电池设置中将本应用电池策略改为「无限制」，并开启「自启动」。
-          files: release-output/EngineSound-Haptics-v1.0.0.apk
+            #### 🚀 v1.1.0 更新日志
+            - **全机型通用适配**：修复 Android 14+ 前台服务 `mediaProjection` 权限细分导致的启动闪退问题。
+            - **免 ROOT 安全降级**：内置智能设备画像与只读环境探测，未 ROOT 手机自动选用原生 Vibrator 引擎，杜绝 `su` 执行错误。
+            - **转子马达与富触觉基元支持**：支持线性马达 1~255 无级调幅，普通转子马达引入软件占空比算法，支持机型启用 `PRIMITIVE_THUD` 鼓点基元。
+            - **通用模式 B 静音策略**：K40G 保持底层 `tinymix` 功放静音，普通手机自适应走系统流级静音。
+            - **界面版本展示**：界面动态呈现识别到的机型画像与当前运行版本号。
+          files: release-output/EngineSound-Haptics-v1.1.0.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
