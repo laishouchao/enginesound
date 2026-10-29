@@ -3,6 +3,7 @@ package com.enginesound.haptics.audio
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
@@ -15,18 +16,11 @@ import com.enginesound.haptics.motor.MotorController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.max
 
 /**
- * 全局系统音频捕获器 (Android 10+ AudioPlaybackCaptureConfiguration + AudioRecord)
- *
- * 核心功能：
- * 1. 抓取整机所有正在发声的 App 音频流 (Bilibili、网易云音乐、抖音、各类游戏等)。
- * 2. 实时抽取 PCM 16-bit 原始数据，无需在内部打开任何本地音乐文件。
- * 3. 实时进行 FFT 变换分析 0~200Hz 低频脉冲与包络。
- * 4. 模式 B (静音外放) 下通过 ROOT 或音频控制器压制扬声器硬件通道，仅保留马达振动共振。
+ * 全局系统音频捕获器 (Android 10+ 通用兼容 + K40G 专属硬件静音优化)
  */
 @RequiresApi(Build.VERSION_CODES.Q)
 class GlobalAudioCapture(
@@ -52,10 +46,11 @@ class GlobalAudioCapture(
     var lowFreqThreshold: Float = 0.15f
 
     private var audioRecord: AudioRecord? = null
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    private var originalVolume: Int = -1
 
     /**
      * 启动系统音频全局抓取
-     * @param mediaProjection 用户授权录屏/音频捕获后返回的 MediaProjection 实例
      */
     fun startCapture(mediaProjection: MediaProjection, scope: CoroutineScope) {
         stopCapture()
@@ -81,7 +76,7 @@ class GlobalAudioCapture(
         } catch (ignored: Exception) {}
         audioRecord = null
 
-        // 若处于模式 B 静音状态，还原扬声器输出
+        // 还原扬声器输出
         restoreSpeakerOutput()
 
         motorController.stop()
@@ -89,34 +84,40 @@ class GlobalAudioCapture(
     }
 
     private fun runCaptureLoop(mediaProjection: MediaProjection) {
-        val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
-            .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-            .addMatchingUsage(AudioAttributes.USAGE_GAME)
-            .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-            .build()
-
-        val audioFormat = AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(SAMPLE_RATE)
-            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
-            .build()
-
-        val minBufSize = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        val bufferSize = max(minBufSize, FFT_SIZE * 4)
-
         try {
+            val config = AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                .build()
+
+            val audioFormat = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+                .build()
+
+            val minBufSize = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            val bufferSize = max(minBufSize, FFT_SIZE * 4)
+
             audioRecord = AudioRecord.Builder()
                 .setAudioPlaybackCaptureConfig(config)
                 .setAudioFormat(audioFormat)
                 .setBufferSizeInBytes(bufferSize)
                 .build()
 
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord 初始化未就绪，系统不支持当前采样格式")
+                stopCapture()
+                return
+            }
+
             audioRecord?.startRecording()
-            Log.i(TAG, "全局系统音频抓取已成功启动")
+            Log.i(TAG, "全局系统音频抓取循环成功启动")
 
             val audioBuffer = ShortArray(FFT_SIZE * 2) // 立体声帧
             val pcmAccumulator = FloatArray(FFT_SIZE)
@@ -124,13 +125,16 @@ class GlobalAudioCapture(
             val magnitudes = FloatArray(FFT_SIZE / 2)
 
             var lastMode = motorController.currentWorkMode
+            if (lastMode == MotorController.WorkMode.MODE_B_VIBRATION_SIMULATION) {
+                applySpeakerMute()
+            }
 
             while (isCapturing) {
-                // 检测模式变动：若切入模式 B，通过 ROOT 压制物理扬声器
+                // 检测模式变动：若切入模式 B，压制物理扬声器
                 if (motorController.currentWorkMode != lastMode) {
                     lastMode = motorController.currentWorkMode
                     if (lastMode == MotorController.WorkMode.MODE_B_VIBRATION_SIMULATION) {
-                        muteSpeakerHardwareViaRoot()
+                        applySpeakerMute()
                     } else {
                         restoreSpeakerOutput()
                     }
@@ -169,49 +173,70 @@ class GlobalAudioCapture(
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "全局音频录制捕获循环异常退出", e)
+            Log.e(TAG, "全局音频捕获循环异常退出", e)
         } finally {
             stopCapture()
         }
     }
 
     /**
-     * 模式 B 下利用 ROOT 权限压制硬件喇叭外放声音
-     * (天玑 1200 / MTK 平台通过 tinymix 调整功放芯片开关，不干扰内部音频抓取)
+     * 模式 B 静音策略：
+     * - 若具备 ROOT 且为 K40G 等支持 tinymix 的平台，优先切断功放通道
+     * - 针对通用/非 ROOT 手机，通过系统音频管理器执行流静音，实现全平台统一效果
      */
-    private fun muteSpeakerHardwareViaRoot() {
-        Thread {
+    private fun applySpeakerMute() {
+        if (motorController.deviceProfile.isRooted) {
+            Thread {
+                try {
+                    val commands = arrayOf(
+                        "tinymix 'Speaker Channel 1 Switch' 0 2>/dev/null",
+                        "tinymix 'Speaker Channel 2 Switch' 0 2>/dev/null"
+                    )
+                    Runtime.getRuntime().exec(arrayOf("su", "-c", commands.joinToString(" ; "))).waitFor()
+                    Log.i(TAG, "已执行 ROOT 功放静音")
+                } catch (ignored: Exception) {}
+            }.start()
+        } else {
             try {
-                // 天玑1200常用 tinymix 开关及通用音量切断
-                val commands = arrayOf(
-                    "tinymix 'Speaker Channel 1 Switch' 0 2>/dev/null",
-                    "tinymix 'Speaker Channel 2 Switch' 0 2>/dev/null",
-                    "cmd audio set-volume-down 2>/dev/null"
-                )
-                val p = Runtime.getRuntime().exec(arrayOf("su", "-c", commands.joinToString(" ; ")))
-                p.waitFor()
-                Log.i(TAG, "已触发 ROOT 级硬件扬声器静音")
+                audioManager?.let { am ->
+                    if (originalVolume == -1) {
+                        originalVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    }
+                    am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+                    Log.i(TAG, "已执行通用 AudioManager 媒体静音")
+                }
             } catch (e: Exception) {
-                Log.w(TAG, "ROOT 硬件静音执行提示: ${e.message}")
+                Log.w(TAG, "通用媒体静音提示: ${e.message}")
             }
-        }.start()
+        }
     }
 
     /**
      * 还原扬声器正常发声
      */
     private fun restoreSpeakerOutput() {
-        Thread {
+        if (motorController.deviceProfile.isRooted) {
+            Thread {
+                try {
+                    val commands = arrayOf(
+                        "tinymix 'Speaker Channel 1 Switch' 1 2>/dev/null",
+                        "tinymix 'Speaker Channel 2 Switch' 1 2>/dev/null"
+                    )
+                    Runtime.getRuntime().exec(arrayOf("su", "-c", commands.joinToString(" ; "))).waitFor()
+                    Log.i(TAG, "已恢复 ROOT 功放通道")
+                } catch (ignored: Exception) {}
+            }.start()
+        }
+
+        if (originalVolume != -1) {
             try {
-                val commands = arrayOf(
-                    "tinymix 'Speaker Channel 1 Switch' 1 2>/dev/null",
-                    "tinymix 'Speaker Channel 2 Switch' 1 2>/dev/null"
-                )
-                val p = Runtime.getRuntime().exec(arrayOf("su", "-c", commands.joinToString(" ; ")))
-                p.waitFor()
-                Log.i(TAG, "已恢复扬声器外放通道")
-            } catch (ignored: Exception) {}
-        }.start()
+                audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, originalVolume, 0)
+                originalVolume = -1
+                Log.i(TAG, "已恢复通用媒体音量")
+            } catch (e: Exception) {
+                Log.w(TAG, "恢复媒体音量提示: ${e.message}")
+            }
+        }
     }
 
     override fun close() {

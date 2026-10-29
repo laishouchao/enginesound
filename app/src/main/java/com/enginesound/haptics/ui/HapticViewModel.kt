@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.enginesound.haptics.audio.AudioCaptureManager
+import com.enginesound.haptics.device.DeviceProfileManager
 import com.enginesound.haptics.motor.MotorController
 import com.enginesound.haptics.service.HapticEngineService
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,12 +14,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * 触觉引擎状态管理 ViewModel
+ * 触觉引擎状态管理 ViewModel (全机型通用适配感知)
  */
 class HapticViewModel(application: Application) : AndroidViewModel(application) {
 
     // 绑定的常驻后台服务引用
     private var boundService: HapticEngineService? = null
+
+    // 设备画像
+    val deviceProfile: DeviceProfileManager.DeviceProfile = DeviceProfileManager.getProfile(application)
 
     // 音频来源
     private val _audioSource = MutableStateFlow(AudioCaptureManager.AudioSource.LOCAL_FILE)
@@ -28,9 +32,15 @@ class HapticViewModel(application: Application) : AndroidViewModel(application) 
     private val _workMode = MutableStateFlow(MotorController.WorkMode.MODE_A_SPEAKER_AND_BEAT)
     val workMode: StateFlow<MotorController.WorkMode> = _workMode.asStateFlow()
 
-    // 马达驱动方式 (ROOT Sysfs 节点 / 原生 Vibrator API)
-    private val _engineType = MutableStateFlow(MotorController.EngineType.ROOT_SYSFS)
+    // 马达驱动方式 (自适应：已 ROOT 且支持节点则开启 ROOT_SYSFS，否则默认 NATIVE_VIBRATOR)
+    private val _engineType = MutableStateFlow(
+        if (deviceProfile.isRedmiK40G && deviceProfile.isRooted) MotorController.EngineType.ROOT_SYSFS
+        else MotorController.EngineType.NATIVE_VIBRATOR
+    )
     val engineType: StateFlow<MotorController.EngineType> = _engineType.asStateFlow()
+
+    private val _isRootEngineAvailable = MutableStateFlow(deviceProfile.isRooted)
+    val isRootEngineAvailable: StateFlow<Boolean> = _isRootEngineAvailable.asStateFlow()
 
     // 运行状态
     private val _isRunning = MutableStateFlow(false)
@@ -64,14 +74,17 @@ class HapticViewModel(application: Application) : AndroidViewModel(application) 
     val showRiskDialog: StateFlow<Boolean> = _showRiskDialog.asStateFlow()
 
     // 调试日志输出（保留最近 30 条）
-    private val _logs = MutableStateFlow<List<String>>(listOf("系统就绪，等待启动..."))
+    private val _logs = MutableStateFlow<List<String>>(listOf("系统就绪，已生成硬件适配画像"))
     val logs: StateFlow<List<String>> = _logs.asStateFlow()
 
     fun bindService(service: HapticEngineService) {
         boundService = service
 
+        // 从 Service 同步自适应探测后的引擎模式
+        _engineType.value = service.motorController.currentEngineType
+        _isRootEngineAvailable.value = service.motorController.isRootEngineReady
+
         // 同步配置到服务
-        service.motorController.currentEngineType = _engineType.value
         service.motorController.currentWorkMode = _workMode.value
         service.motorController.masterGain = _masterGain.value
         service.motorController.maxIntensityLimit = _maxLimit.value
@@ -104,19 +117,23 @@ class HapticViewModel(application: Application) : AndroidViewModel(application) 
     fun setAudioSource(source: AudioCaptureManager.AudioSource) {
         _audioSource.value = source
         boundService?.audioManager?.currentSource = source
-        appendLog("音频来源切换为: ${if (source == AudioCaptureManager.AudioSource.LOCAL_FILE) "本地音频文件" else "全局系统捕获"}")
+        appendLog("音频来源切换为: ${if (source == AudioCaptureManager.AudioSource.LOCAL_FILE) "本地音频文件" else "全局系统音频捕获"}")
     }
 
     fun setWorkMode(mode: MotorController.WorkMode) {
         _workMode.value = mode
         boundService?.motorController?.currentWorkMode = mode
-        appendLog("工作模式切换为: ${if (mode == MotorController.WorkMode.MODE_A_SPEAKER_AND_BEAT) "模式A (扬声器+鼓点)" else "模式B (仅振动模拟/静音喇叭)"}")
+        appendLog("工作模式切换为: ${if (mode == MotorController.WorkMode.MODE_A_SPEAKER_AND_BEAT) "模式 A (扬声器+鼓点)" else "模式 B (仅振动模拟/静音喇叭)"}")
     }
 
     fun setEngineType(type: MotorController.EngineType) {
+        if (type == MotorController.EngineType.ROOT_SYSFS && !_isRootEngineAvailable.value) {
+            appendLog("⚠️ 当前设备未获取 ROOT 权限或无匹配驱动节点，无法切换到 Sysfs 直驱")
+            return
+        }
         _engineType.value = type
         boundService?.motorController?.currentEngineType = type
-        appendLog("马达引擎切换为: ${if (type == MotorController.EngineType.ROOT_SYSFS) "ROOT Sysfs硬件直驱" else "Android 原生Vibrator"}")
+        appendLog("马达引擎切换为: ${if (type == MotorController.EngineType.ROOT_SYSFS) "ROOT Sysfs 硬件直驱" else "通用原生 Vibrator 引擎"}")
     }
 
     fun setMasterGain(gain: Float) {
@@ -148,7 +165,7 @@ class HapticViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleStartPause(onRequestMediaProjection: () -> Unit) {
         val service = boundService ?: run {
-            appendLog("后台服务未连接")
+            appendLog("⚠️ 后台服务正在连接，请稍候...")
             return
         }
 

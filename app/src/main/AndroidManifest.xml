@@ -14,8 +14,9 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
-    <!-- 后台前台服务与保活权限 -->
+    <!-- 后台前台服务与保活权限 (Android 14+ 严格分类) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -43,12 +44,12 @@
             </intent-filter>
         </activity>
 
-        <!-- 后台音频捕获与马达驱动核心前台服务 -->
+        <!-- 后台音频捕获与马达驱动核心前台服务 (兼容 Android 10 ~ 15) -->
         <service
             android:name=".service.HapticEngineService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection|microphone" />
+            android:foregroundServiceType="mediaPlayback|mediaProjection|microphone" />
 
     </application>
 

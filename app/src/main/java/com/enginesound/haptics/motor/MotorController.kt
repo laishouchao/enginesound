@@ -1,23 +1,14 @@
 package com.enginesound.haptics.motor
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
+import com.enginesound.haptics.device.DeviceProfileManager
 import com.enginesound.haptics.dsp.EnvelopeFollower
 import java.util.concurrent.ConcurrentLinkedQueue
-import kotlin.math.max
 import kotlin.math.min
 
 /**
- * 马达驱动综合调度与保护控制器
- *
- * 负责：
- * 1. 切换【原生 Vibrator 引擎】与【ROOT Sysfs 直接硬件引擎】
- * 2. 调度【模式 A: 鼓点触觉脉冲】与【模式 B: 连续低频物理共振模拟】
- * 3. 硬件安全防护：最大振幅硬限制 (Max Limit) 与线圈过热/长载保护 (Thermal/Duty Protection)
- * 4. 延迟校准补偿队列 (Latency Calibration Queue)
- * 5. 暂停时即刻切断马达供电
+ * 马达驱动综合调度与保护控制器 (具备全品牌通用适配 + K40G 专属深度定制)
  */
 class MotorController(
     private val context: Context,
@@ -29,8 +20,8 @@ class MotorController(
     }
 
     enum class EngineType {
-        NATIVE_VIBRATOR,
-        ROOT_SYSFS
+        NATIVE_VIBRATOR, // Android 原生通用 Vibrator 驱动 (兼容所有品牌手机)
+        ROOT_SYSFS       // ROOT Sysfs 硬件直驱 (K40G 及已 ROOT 平台超低延迟)
     }
 
     enum class WorkMode {
@@ -38,12 +29,27 @@ class MotorController(
         MODE_B_VIBRATION_SIMULATION // 模式 B：扬声器静音 + 连续低频振膜物理模拟
     }
 
-    // 当前选用的马达驱动引擎
-    var currentEngineType: EngineType = EngineType.ROOT_SYSFS
+    val deviceProfile = DeviceProfileManager.getProfile(context)
+
+    // 引擎实例
+    private val nativeEngine = NativeVibratorEngine(context)
+    private val rootEngine = RootSysfsEngine()
+    private val envelopeFollower = EnvelopeFollower()
+
+    var isRootEngineReady: Boolean = false
+        private set
+
+    // 当前选用的马达驱动引擎（根据设备特征智能初始化默认值）
+    var currentEngineType: EngineType = EngineType.NATIVE_VIBRATOR
         set(value) {
+            if (value == EngineType.ROOT_SYSFS && !isRootEngineReady) {
+                onDebugLog?.invoke("当前设备未获取 ROOT 或未找到可用硬件节点，维持通用原生引擎")
+                field = EngineType.NATIVE_VIBRATOR
+                return
+            }
             field = value
             stop()
-            onDebugLog?.invoke("已切换马达引擎: ${value.name}")
+            onDebugLog?.invoke("已切换马达引擎: ${if (value == EngineType.ROOT_SYSFS) "ROOT Sysfs 极速硬件直驱" else "通用原生 Vibrator"}")
         }
 
     // 当前工作模式
@@ -52,7 +58,7 @@ class MotorController(
             field = value
             stop()
             envelopeFollower.reset()
-            onDebugLog?.invoke("已切换工作模式: ${value.name}")
+            onDebugLog?.invoke("已切换工作模式: ${if (value == WorkMode.MODE_A_SPEAKER_AND_BEAT) "模式 A (扬声器+鼓点)" else "模式 B (仅振动模拟/扬声器静音)"}")
         }
 
     // 用户调节参数
@@ -60,14 +66,6 @@ class MotorController(
     var maxIntensityLimit: Float = 0.85f  // 最大振幅安全上限 (0.1 ~ 1.0)
     var latencyOffsetMs: Int = 0          // 延迟时间偏移补偿 (毫秒)
     var isThermalProtectionEnabled: Boolean = true
-
-    // 引擎实例
-    private val nativeEngine = NativeVibratorEngine(context)
-    private val rootEngine = RootSysfsEngine()
-    private val envelopeFollower = EnvelopeFollower()
-
-    private var isRootEngineReady = false
-    private val mainHandler = Handler(Looper.getMainLooper())
 
     // 硬件过热与线圈保护：连续高占空比追踪
     private var highLoadConsecutiveFrames = 0
@@ -77,18 +75,33 @@ class MotorController(
     private data class DelayedVibration(
         val executeTimeMs: Long,
         val intensity: Float,
-        val durationMs: Int
+        val durationMs: Int,
+        val isBeat: Boolean
     )
     private val delayQueue = ConcurrentLinkedQueue<DelayedVibration>()
 
     init {
-        // 尝试探测硬件节点并初始化 ROOT
-        val discoveredNodes = SysfsNodeScanner.detectNodes(suShellAvailable = true)
-        isRootEngineReady = rootEngine.initialize(discoveredNodes)
-        if (!isRootEngineReady) {
-            Log.w(TAG, "ROOT 引擎不可用，强制降级为原生 Vibrator 引擎")
-            currentEngineType = EngineType.NATIVE_VIBRATOR
+        // 智能探查机型与 ROOT 状态
+        if (deviceProfile.isRooted) {
+            try {
+                val discoveredNodes = SysfsNodeScanner.detectNodes(suShellAvailable = true)
+                isRootEngineReady = rootEngine.initialize(discoveredNodes)
+            } catch (e: Exception) {
+                Log.w(TAG, "探查 ROOT 节点异常，安全降级: ${e.message}")
+                isRootEngineReady = false
+            }
+        } else {
+            isRootEngineReady = false
         }
+
+        // 默认引擎判定：如果是已 ROOT 的 K40G，默认启动最高性能的 ROOT_SYSFS；其余手机默认采用兼容性最稳的原生引擎
+        currentEngineType = if (deviceProfile.isRedmiK40G && isRootEngineReady) {
+            EngineType.ROOT_SYSFS
+        } else {
+            EngineType.NATIVE_VIBRATOR
+        }
+
+        onDebugLog?.invoke("设备适配画像: ${deviceProfile.recommendedEngineDescription}")
     }
 
     /**
@@ -98,6 +111,7 @@ class MotorController(
     fun processLowFreqEnergy(lowFreqEnergy: Float) {
         val calculatedIntensity: Float
         val durationMs: Int
+        var isBeat = false
 
         when (currentWorkMode) {
             WorkMode.MODE_A_SPEAKER_AND_BEAT -> {
@@ -106,6 +120,7 @@ class MotorController(
                 if (beatPower > 0.0f) {
                     calculatedIntensity = beatPower * masterGain
                     durationMs = 42 // 典型鼓点清脆打击感脉冲持续时间 (35ms ~ 45ms)
+                    isBeat = true
                 } else {
                     return
                 }
@@ -120,6 +135,7 @@ class MotorController(
                 }
                 calculatedIntensity = smoothEnvelope * masterGain
                 durationMs = 24 // 连续帧间隔驱动 (20ms ~ 25ms)
+                isBeat = false
             }
         }
 
@@ -134,10 +150,10 @@ class MotorController(
         // 3. 处理延迟校准
         if (latencyOffsetMs > 0) {
             val targetTime = System.currentTimeMillis() + latencyOffsetMs
-            delayQueue.add(DelayedVibration(targetTime, safeIntensity, durationMs))
+            delayQueue.add(DelayedVibration(targetTime, safeIntensity, durationMs, isBeat))
             drainDelayedQueue()
         } else {
-            dispatchVibration(safeIntensity, durationMs)
+            dispatchVibration(safeIntensity, durationMs, isBeat)
         }
     }
 
@@ -166,9 +182,9 @@ class MotorController(
     }
 
     /**
-     * 分发振动命令到具体底层引擎
+     * 分发振动命令到底层驱动引擎
      */
-    private fun dispatchVibration(intensity: Float, durationMs: Int) {
+    private fun dispatchVibration(intensity: Float, durationMs: Int, isBeat: Boolean) {
         if (intensity <= 0.001f) {
             stop()
             return
@@ -179,11 +195,15 @@ class MotorController(
                 if (isRootEngineReady) {
                     rootEngine.vibrate(intensity, durationMs)
                 } else {
-                    nativeEngine.vibrate(intensity, durationMs)
+                    nativeEngine.vibrate(intensity, durationMs, isBeatPulse = isBeat)
                 }
             }
             EngineType.NATIVE_VIBRATOR -> {
-                nativeEngine.vibrate(intensity, durationMs)
+                if (isBeat && deviceProfile.supportsRichHaptics) {
+                    nativeEngine.vibrateRichBeat(intensity)
+                } else {
+                    nativeEngine.vibrate(intensity, durationMs, isBeatPulse = isBeat)
+                }
             }
         }
     }
@@ -197,7 +217,7 @@ class MotorController(
             val task = delayQueue.peek() ?: break
             if (now >= task.executeTimeMs) {
                 delayQueue.poll()
-                dispatchVibration(task.intensity, task.durationMs)
+                dispatchVibration(task.intensity, task.durationMs, task.isBeat)
             } else {
                 break
             }
@@ -205,12 +225,14 @@ class MotorController(
     }
 
     /**
-     * 立即停止马达（当音乐暂停、切歌或界面点击暂停时调用）
+     * 立即切断马达供电与动作
      */
     fun stop() {
         delayQueue.clear()
         envelopeFollower.reset()
-        rootEngine.stop()
+        if (isRootEngineReady) {
+            rootEngine.stop()
+        }
         nativeEngine.stop()
     }
 

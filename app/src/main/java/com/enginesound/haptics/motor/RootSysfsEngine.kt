@@ -8,9 +8,10 @@ import kotlin.math.roundToInt
 /**
  * ROOT Sysfs 直接硬件控制引擎
  *
- * 核心设计：
+ * 核心优化：
  * 维持一个长驻交互式 ROOT Shell 进程 (su)，避免高频音频帧（20ms~50ms/次）重复 fork 进程。
  * 将写入开销从 50ms 骤降至 < 0.5ms，消除马达触觉与音乐之间的硬件时延。
+ * 具备严格的容错防护，若在非 ROOT 或权限被拒绝的机型上调用，绝不抛出异常。
  */
 class RootSysfsEngine : AutoCloseable {
 
@@ -20,7 +21,8 @@ class RootSysfsEngine : AutoCloseable {
 
     private var suProcess: Process? = null
     private var suWriter: BufferedWriter? = null
-    private var isInitialized = false
+    var isInitialized = false
+        private set
 
     private var discoveredNodes: SysfsNodeScanner.DiscoveredNodes? = null
 
@@ -28,20 +30,25 @@ class RootSysfsEngine : AutoCloseable {
      * 初始化 ROOT 驱动引擎并提升节点访问权限
      */
     fun initialize(nodes: SysfsNodeScanner.DiscoveredNodes?): Boolean {
+        if (nodes == null) {
+            isInitialized = false
+            return false
+        }
+
         this.discoveredNodes = nodes
         return try {
             val process = ProcessBuilder("su").redirectErrorStream(true).start()
             val writer = BufferedWriter(OutputStreamWriter(process.outputStream))
 
-            // 1. 临时切换 SELinux 为宽容模式 (Permissive)，彻底解决 MIUI 严格的 SELinux 节点读写拦截
-            writer.write("setenforce 0\n")
+            // 1. 临时切换 SELinux 为宽容模式 (Permissive)，彻底解决各品牌 ROM 的 SELinux 节点读写拦截
+            writer.write("setenforce 0 2>/dev/null\n")
 
             // 2. 赋予检测到的马达节点完全读写权限
-            nodes?.let {
-                it.brightnessNode?.let { node -> writer.write("chmod 666 $node\n") }
-                it.durationNode?.let { node -> writer.write("chmod 666 $node\n") }
-                it.activateNode?.let { node -> writer.write("chmod 666 $node\n") }
-                it.enableNode?.let { node -> writer.write("chmod 666 $node\n") }
+            nodes.let {
+                it.brightnessNode?.let { node -> writer.write("chmod 666 $node 2>/dev/null\n") }
+                it.durationNode?.let { node -> writer.write("chmod 666 $node 2>/dev/null\n") }
+                it.activateNode?.let { node -> writer.write("chmod 666 $node 2>/dev/null\n") }
+                it.enableNode?.let { node -> writer.write("chmod 666 $node 2>/dev/null\n") }
             }
 
             writer.flush()
@@ -49,10 +56,10 @@ class RootSysfsEngine : AutoCloseable {
             suProcess = process
             suWriter = writer
             isInitialized = true
-            Log.i(TAG, "ROOT Sysfs 引擎初始化成功，节点: ${nodes?.baseDir}")
+            Log.i(TAG, "ROOT Sysfs 引擎初始化成功，节点: ${nodes.baseDir}")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "获取 ROOT 权限或启动 su 进程失败", e)
+            Log.w(TAG, "初始化 ROOT Sysfs 引擎失败（非 ROOT 设备将平滑转用原生引擎）: ${e.message}")
             isInitialized = false
             false
         }
@@ -80,7 +87,7 @@ class RootSysfsEngine : AutoCloseable {
             val brightnessValue = (clampedIntensity * 255.0f).roundToInt().coerceIn(1, 255)
             val durationValue = durationMs.coerceIn(10, 2000)
 
-            // 优先模式 1：常见 leds/vibrator 子系统
+            // 优先模式 1：标准 leds/vibrator 子系统 (K40G 及多数平台)
             if (nodes.brightnessNode != null && nodes.durationNode != null) {
                 writer.write("echo $durationValue > ${nodes.durationNode}\n")
                 writer.write("echo $brightnessValue > ${nodes.brightnessNode}\n")
@@ -88,7 +95,7 @@ class RootSysfsEngine : AutoCloseable {
                     writer.write("echo 1 > ${nodes.activateNode}\n")
                 }
             } else if (nodes.enableNode != null) {
-                // 传统 timed_output 驱动（如部分 MTK 内核）
+                // 模式 2：传统 timed_output 驱动（如三星/部分高通/MTK 内核）
                 writer.write("echo $durationValue > ${nodes.enableNode}\n")
             } else if (nodes.brightnessNode != null) {
                 writer.write("echo $brightnessValue > ${nodes.brightnessNode}\n")
@@ -101,7 +108,7 @@ class RootSysfsEngine : AutoCloseable {
     }
 
     /**
-     * 立即切断马达供电与振动（防止暂停后马达由于持续时间未到继续长鸣）
+     * 立即切断马达供电与振动
      */
     fun stop() {
         if (!isInitialized || suWriter == null) return

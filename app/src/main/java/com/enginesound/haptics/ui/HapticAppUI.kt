@@ -3,7 +3,6 @@ package com.enginesound.haptics.ui
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,6 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.enginesound.haptics.audio.AudioCaptureManager
+import com.enginesound.haptics.device.DeviceProfileManager
 import com.enginesound.haptics.motor.MotorController
 import com.enginesound.haptics.ui.theme.*
 
@@ -47,6 +47,9 @@ fun HapticAppUI(
     val lowFreqThreshold by viewModel.lowFreqThreshold.collectAsState()
     val showRiskDialog by viewModel.showRiskDialog.collectAsState()
     val logs by viewModel.logs.collectAsState()
+    val isRootAvailable by viewModel.isRootEngineAvailable.collectAsState()
+
+    val profile = viewModel.deviceProfile
 
     // 硬件风险提示弹窗
     if (showRiskDialog) {
@@ -56,8 +59,8 @@ fun HapticAppUI(
             title = { Text("⚠️ 硬件安全与寿命提醒", color = TextPrimary, fontWeight = FontWeight.Bold) },
             text = {
                 Text(
-                    "红米 K40 游戏增强版搭载了高性能 X 轴线性马达。\n\n" +
-                            "1. 长时间满幅振动或高频驱动可能会引起马达音圈过热、机械弹片金属疲劳，甚至引起机身内部精密螺丝微幅共振松动。\n" +
+                    "手机线性马达设计用于短促震动反馈。\n\n" +
+                            "1. 长时间连续满负荷振动可能会引起音圈发热或机械弹片金属疲劳。\n" +
                             "2. 系统内已内置「最大振幅硬顶限制」与「持续高负荷过热限幅算法」，建议将最大振动限制保持在 85% 以下。\n" +
                             "3. 连续体验建议不要超过 30 分钟。",
                     color = TextSecondary,
@@ -91,10 +94,15 @@ fun HapticAppUI(
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(CyberGreen.copy(alpha = 0.2f))
+                                .background(if (profile.isRedmiK40G) CyberGreen.copy(alpha = 0.2f) else CyberCyan.copy(alpha = 0.2f))
                                 .padding(horizontal = 6.dp, vertical = 2.dp)
                         ) {
-                            Text("Redmi K40G 特调", color = CyberGreen, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = if (profile.isRedmiK40G) "K40G 特调版" else "${profile.manufacturer} 通用版",
+                                color = if (profile.isRedmiK40G) CyberGreen else CyberCyan,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
                     }
                 },
@@ -116,6 +124,9 @@ fun HapticAppUI(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // 0. 设备画像识别卡片 (展示通用兼容与适配状态)
+            DeviceProfileCard(profile = profile, isRootAvailable = isRootAvailable)
+
             // 1. 实时能量动态光柱与频谱表
             RealtimeEnergyCard(realtimeEnergy = realtimeEnergy, threshold = lowFreqThreshold, isRunning = isRunning)
 
@@ -142,6 +153,7 @@ fun HapticAppUI(
             // 5. 马达驱动方式切换 (ROOT Sysfs 直驱 vs 原生 Vibrator)
             EngineSelectorCard(
                 currentEngine = engineType,
+                isRootAvailable = isRootAvailable,
                 onSelectEngine = { viewModel.setEngineType(it) }
             )
 
@@ -159,6 +171,44 @@ fun HapticAppUI(
 
             // 7. 实时低频能量与事件调试控制台
             DebugLogConsoleCard(logs = logs)
+        }
+    }
+}
+
+@Composable
+fun DeviceProfileCard(profile: DeviceProfileManager.DeviceProfile, isRootAvailable: Boolean) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("已适配硬件", color = TextSecondary, fontSize = 12.sp)
+                Text(
+                    text = if (isRootAvailable) "ROOT 已就绪" else "免 ROOT 运行中",
+                    color = if (isRootAvailable) CyberPurple else CyberGreen,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "${profile.manufacturer} ${profile.model}",
+                color = TextPrimary,
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = profile.recommendedEngineDescription,
+                color = if (profile.isRedmiK40G) CyberGreen else CyberCyan,
+                fontSize = 12.sp
+            )
         }
     }
 }
@@ -311,7 +361,7 @@ fun AudioSourceSelectorCard(
             } else {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "支持捕获 B站、网易云、抖音、游戏等所有正在发声的应用，无需在应用内打开文件。",
+                    text = "支持捕获 B站、网易云、抖音、游戏等所有第三方应用发声，无需在应用内导入文件。",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
@@ -374,6 +424,7 @@ fun WorkModeSelectorCard(
 @Composable
 fun EngineSelectorCard(
     currentEngine: MotorController.EngineType,
+    isRootAvailable: Boolean,
     onSelectEngine: (MotorController.EngineType) -> Unit
 ) {
     Card(
@@ -391,10 +442,15 @@ fun EngineSelectorCard(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
-                        .background(CyberPurple.copy(alpha = 0.2f))
+                        .background(if (isRootAvailable) CyberPurple.copy(alpha = 0.2f) else DarkSurfaceVariant)
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
-                    Text("ROOT 高权限", color = CyberPurple, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = if (isRootAvailable) "ROOT 高权限模式" else "通用免 ROOT 模式",
+                        color = if (isRootAvailable) CyberPurple else TextSecondary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
 
@@ -402,22 +458,35 @@ fun EngineSelectorCard(
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
-                    selected = currentEngine == MotorController.EngineType.ROOT_SYSFS,
-                    onClick = { onSelectEngine(MotorController.EngineType.ROOT_SYSFS) },
-                    label = { Text("ROOT Sysfs 直驱 (<1ms 极低延迟)") },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = CyberPurple,
-                        selectedLabelColor = Color.White
-                    )
-                )
-                FilterChip(
                     selected = currentEngine == MotorController.EngineType.NATIVE_VIBRATOR,
                     onClick = { onSelectEngine(MotorController.EngineType.NATIVE_VIBRATOR) },
-                    label = { Text("原生 Vibrator API (兼容)") },
+                    label = { Text("通用原生 Vibrator (全机型)") },
                     colors = FilterChipDefaults.filterChipColors(
                         selectedContainerColor = CyberGreen,
                         selectedLabelColor = DarkBackground
                     )
+                )
+
+                FilterChip(
+                    selected = currentEngine == MotorController.EngineType.ROOT_SYSFS,
+                    onClick = { onSelectEngine(MotorController.EngineType.ROOT_SYSFS) },
+                    enabled = isRootAvailable,
+                    label = { Text("ROOT Sysfs 直驱 (<1ms)") },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = CyberPurple,
+                        selectedLabelColor = Color.White,
+                        disabledContainerColor = DarkSurfaceVariant,
+                        disabledLabelColor = TextSecondary.copy(alpha = 0.5f)
+                    )
+                )
+            }
+
+            if (!isRootAvailable) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "提示：本机未取得 ROOT 权限或无直接写节点，已自动使用稳定通用的原生 Vibrator 引擎。",
+                    color = TextSecondary,
+                    fontSize = 11.sp
                 )
             }
         }

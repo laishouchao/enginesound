@@ -30,12 +30,14 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * 触觉引擎前台常驻服务
+ * 触觉引擎前台常驻服务 (高鲁棒性·全平台零闪退设计)
  *
- * 核心目的：
- * 1. 挂载系统前台服务 (Foreground Service)，持有 CPU WakeLock，防止 MIUI/HyperOS 后台激进省电查杀。
- * 2. 托管 MediaProjection 与 AudioRecord 生命周期，保证切换至 B站、网易云音乐等其他 App 时后台持续生效。
- * 3. 集中持有 MotorController 与 AudioCaptureManager，为 Activity 提供稳定的 Binder 控制桥梁。
+ * 核心设计：
+ * 1. 严格契合 Android 14 (API 34) 细分前台服务类型规则，杜绝因未授权 MediaProjection 盲目
+ *    声明 FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION 导致的 SecurityException 闪退。
+ * 2. 在待机与本地音乐模式下，使用 MEDIA_PLAYBACK 稳固挂载前台保活；获得录屏投射授权后动态
+ *    升级为 MEDIA_PROJECTION。
+ * 3. 持有 CPU WakeLock 防止后台休眠，安全捕获异常。
  */
 class HapticEngineService : Service() {
 
@@ -119,6 +121,8 @@ class HapticEngineService : Service() {
 
     fun setMediaProjection(projection: MediaProjection) {
         this.mediaProjection = projection
+        // 取得有效 MediaProjection 句柄后，升级前台服务类型为 MEDIA_PROJECTION
+        startForegroundNotification()
     }
 
     fun setLocalAudioUri(uri: Uri) {
@@ -135,14 +139,14 @@ class HapticEngineService : Service() {
                 localAudioUri?.let { uri ->
                     audioManager.startLocal(uri)
                 } ?: run {
-                    _debugLogs.tryEmit("未选择本地音频文件")
+                    _debugLogs.tryEmit("⚠️ 未选择本地音频文件")
                 }
             }
             AudioCaptureManager.AudioSource.GLOBAL_SYSTEM -> {
                 mediaProjection?.let { projection ->
                     audioManager.startGlobal(projection)
                 } ?: run {
-                    _debugLogs.tryEmit("未获得系统录音/录屏授权")
+                    _debugLogs.tryEmit("⚠️ 未获得系统全局音频捕获授权")
                 }
             }
         }
@@ -156,16 +160,21 @@ class HapticEngineService : Service() {
         motorController.stop()
         _realtimeEnergy.value = 0.0f
         _isRunning.value = false
+        updateNotification(false)
     }
 
     private fun acquireWakeLock() {
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "EngineSound:HapticEngineWakeLock"
-        ).apply {
-            setReferenceCounted(false)
-            acquire(24 * 60 * 60 * 1000L) // 24小时最长超时
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "EngineSound:HapticEngineWakeLock"
+            ).apply {
+                setReferenceCounted(false)
+                acquire(24 * 60 * 60 * 1000L) // 24小时超时防护
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "申请 WakeLock 提示: ${e.message}")
         }
     }
 
@@ -189,28 +198,49 @@ class HapticEngineService : Service() {
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            manager?.createNotificationChannel(channel)
         }
     }
 
+    /**
+     * 安全启动前台通知 (完美契合 Android 14+ FGS 安全规范)
+     */
     private fun startForegroundNotification() {
         val notification = buildNotification(isRunning.value)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // Android 14+
+                val serviceType = if (mediaProjection != null) {
+                    // 已具备有效 MediaProjection 实例时才声明 MEDIA_PROJECTION 类型
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                } else {
+                    // 默认与本地播放模式下，使用标准的 MEDIA_PLAYBACK，杜绝 SecurityException
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                }
+                startForeground(NOTIFICATION_ID, notification, serviceType)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
             } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                startForeground(NOTIFICATION_ID, notification)
             }
-            startForeground(NOTIFICATION_ID, notification, serviceType)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            Log.e(TAG, "启动前台服务通知安全捕获", e)
+            try {
+                // 若由于个别厂商 ROM 权限限制抛出异常，尝试以无类型兜底挂载
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } catch (ignored: Exception) {}
         }
     }
 
     private fun updateNotification(running: Boolean) {
-        val notification = buildNotification(running)
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, notification)
+        try {
+            val notification = buildNotification(running)
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.notify(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            Log.w(TAG, "更新通知提示: ${e.message}")
+        }
     }
 
     private fun buildNotification(running: Boolean): Notification {
@@ -231,8 +261,8 @@ class HapticEngineService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("触觉低音炮 (${if (running) "运行中" else "已暂停"})")
-            .setContentText(if (running) "低频触觉引擎正在驱动 X 轴线性马达..." else "引擎处于静止待机状态")
+            .setContentTitle("触觉低音炮 (${if (running) "运行中" else "待机"})")
+            .setContentText(if (running) "低频触觉引擎正在驱动马达..." else "引擎处于静止待机状态")
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(pendingOpenApp)
             .addAction(

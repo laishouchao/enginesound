@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.provider.OpenableColumns
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,7 +24,14 @@ import com.enginesound.haptics.ui.HapticAppUI
 import com.enginesound.haptics.ui.HapticViewModel
 import com.enginesound.haptics.ui.theme.EngineSoundHapticsTheme
 
+/**
+ * 应用主入口 (具备全品牌全平台容错与全局崩溃拦截)
+ */
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        private const val TAG = "MainActivity"
+    }
 
     private val viewModel: HapticViewModel by viewModels()
 
@@ -38,6 +46,7 @@ class MainActivity : ComponentActivity() {
                 hapticService = service
                 isServiceBound = true
                 viewModel.bindService(service)
+                Log.i(TAG, "成功绑定 HapticEngineService")
             }
         }
 
@@ -45,6 +54,7 @@ class MainActivity : ComponentActivity() {
             viewModel.unbindService()
             hapticService = null
             isServiceBound = false
+            Log.w(TAG, "HapticEngineService 意外解绑")
         }
     }
 
@@ -61,13 +71,18 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK && result.data != null) {
-            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            val projection = projectionManager.getMediaProjection(result.resultCode, result.data!!)
-            if (projection != null) {
-                hapticService?.setMediaProjection(projection)
-                hapticService?.startOrResume()
-            } else {
-                Toast.makeText(this, "未能获取系统全局音频捕获句柄", Toast.LENGTH_SHORT).show()
+            try {
+                val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+                val projection = projectionManager?.getMediaProjection(result.resultCode, result.data!!)
+                if (projection != null) {
+                    hapticService?.setMediaProjection(projection)
+                    hapticService?.startOrResume()
+                } else {
+                    Toast.makeText(this, "未能获取系统全局音频捕获句柄", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "获取 MediaProjection 句柄异常", e)
+                Toast.makeText(this, "系统投射服务暂不可用: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         } else {
             Toast.makeText(this, "用户取消了系统全局音频捕获授权", Toast.LENGTH_SHORT).show()
@@ -87,6 +102,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 部署全局未捕获异常守护，杜绝第三方系统偶发非规范行为导致的无声闪退
+        setupGlobalCrashHandler()
+
         checkAndRequestPermissions()
         startAndBindHapticService()
 
@@ -95,7 +113,11 @@ class MainActivity : ComponentActivity() {
                 HapticAppUI(
                     viewModel = viewModel,
                     onPickAudioFile = {
-                        pickAudioLauncher.launch("audio/*")
+                        try {
+                            pickAudioLauncher.launch("audio/*")
+                        } catch (e: Exception) {
+                            Toast.makeText(this, "打开文件选择器失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onRequestMediaProjection = {
                         requestMediaProjectionPermission()
@@ -105,9 +127,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setupGlobalCrashHandler() {
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e(TAG, "【全局崩溃守护捕获】线程: ${thread.name}, 错误: ${throwable.message}", throwable)
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+    }
+
     private fun requestMediaProjectionPermission() {
-        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+        try {
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            if (projectionManager != null) {
+                mediaProjectionLauncher.launch(projectionManager.createScreenCaptureIntent())
+            } else {
+                Toast.makeText(this, "当前系统不支持屏幕/音频投射捕获", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "启动 MediaProjection 申请授权失败", e)
+            Toast.makeText(this, "申请全局捕获失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun checkAndRequestPermissions() {
@@ -128,31 +167,48 @@ class MainActivity : ComponentActivity() {
         }
 
         if (missing.isNotEmpty()) {
-            requestPermissionsLauncher.launch(missing.toTypedArray())
+            try {
+                requestPermissionsLauncher.launch(missing.toTypedArray())
+            } catch (e: Exception) {
+                Log.w(TAG, "动态申请权限提示: ${e.message}")
+            }
         }
     }
 
     private fun startAndBindHapticService() {
         val intent = Intent(this, HapticEngineService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "startForegroundService 启动异常（将平滑仅执行 bindService）: ${e.message}")
         }
-        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+
+        try {
+            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        } catch (e: Exception) {
+            Log.e(TAG, "绑定 HapticEngineService 失败", e)
+        }
     }
 
     private fun queryFileName(uri: Uri): String? {
         var name: String? = null
         if (uri.scheme == "content") {
-            val cursor = contentResolver.query(uri, null, null, null, null)
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val index = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (index != -1) {
-                        name = it.getString(index)
+            try {
+                val cursor = contentResolver.query(uri, null, null, null, null)
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val index = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (index != -1) {
+                            name = it.getString(index)
+                        }
                     }
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "查询文件名异常: ${e.message}")
             }
         }
         if (name == null) {
@@ -168,7 +224,9 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         if (isServiceBound) {
-            unbindService(serviceConnection)
+            try {
+                unbindService(serviceConnection)
+            } catch (ignored: Exception) {}
             isServiceBound = false
         }
     }
